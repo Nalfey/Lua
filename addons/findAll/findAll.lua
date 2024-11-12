@@ -27,8 +27,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ]]
 
 _addon.name    = 'findAll'
-_addon.author  = 'Zohno'
-_addon.version = '1.20190514'
+_addon.author  = 'Zohno & Nalfey'
+_addon.version = '1.2020000'
 _addon.commands = {'findall'}
 
 require('chat')
@@ -198,8 +198,17 @@ end)
 merged_storages_orders = storages_order + storage_slips_order + L{'key items'}
 
 function search(query, export)    
-    update_global_storage()
-    update()
+    local success, err = pcall(update_global_storage)
+    if not success then
+        error('Failed to update global storage: ' .. err)
+        return
+    end
+
+    if not update() then
+        error('Failed to update current character storage')
+        return
+    end
+
     if query:length() == 0 then
         return
     end
@@ -408,14 +417,15 @@ function search(query, export)
 end
 
 function get_local_storage()
-    local items    = windower.ffxi.get_items()
-    local storages = {}
-
+    local items = windower.ffxi.get_items()
     if not items then
+        error('Failed to get items from FFXI')
         return false
     end
 
-    storages.gil = items.gil
+    local storages = {
+        gil = type(items.gil) == 'number' and items.gil or 0
+    }
 
     for _, storage_name in ipairs(storages_order) do
         storages[storage_name] = T{}
@@ -479,7 +489,7 @@ end
 
 function update()
     if not windower.ffxi.get_info().logged_in then
-        print('You have to be logged in to use this addon.')
+        error('You have to be logged in to use this addon.')
         return false
     end
 
@@ -503,7 +513,15 @@ function update()
 		return false
 	end
     
-    self_storage:write('return '..make_table(local_storage,0)..'\n')
+    local success, err = pcall(function()
+        self_storage:write('return '..make_table(local_storage,0)..'\n')
+    end)
+    
+    if not success then
+        error('Failed to write storage file: ' .. err)
+        return false
+    end
+
     collectgarbage()
     return true
 end
@@ -561,56 +579,368 @@ windower.register_event('ipc message', function(str)
 end)
 
 handle_command = function(...)
-    if first_pass then
-        first_pass = false
-        windower.send_ipc_message('findAll update')
-        windower.send_command('wait 0.05;findall '..table.concat({...},' '))
+    local params = L{...}
+    
+    if params[1] == 'findcards' then
+        if not params[2] then
+            log('Usage: //findall findcards JOB')
+            return
+        end
+        local job = params[2]:upper()
+        find_cards(job)
     else
-        first_pass = true
-        local params = L{...}
-        local query  = L{}
-        local export = nil
+        if first_pass then
+            first_pass = false
+            windower.send_ipc_message('findAll update')
+            windower.send_command('wait 0.05;findall '..table.concat({...},' '))
+        else
+            local query  = L{}
+            local export = nil
 
-        -- convert command line params (SJIS) to UTF-8
-        for i, elm in ipairs(params) do
-            params[i] = windower.from_shift_jis(elm)
-        end
-
-        while params:length() > 0 and params[1]:match('^[:!]%a+$') do
-            query:append(params:remove(1))
-        end
-
-        if params:length() > 0 then
-            export = params[params:length()]:match('^--export=(.+)$') or params[params:length()]:match('^-e(.+)$')
-
-            if export ~= nil then
-                export = export:gsub('%.csv$', '')..'.csv'
-
-                params:remove(params:length())
-
-                if export:match('['..('\\/:*?"<>|'):escape()..']') then
-                    export = nil
-
-                    error('The filename cannot contain any of the following characters: \\ / : * ? " < > |')
-                end
+            -- convert command line params (SJIS) to UTF-8
+            for i, elm in ipairs(params) do
+                params[i] = windower.from_shift_jis(elm)
             end
 
-            query:append(params:concat(' '))
-        end
+            while params:length() > 0 and params[1]:match('^[:!]%a+$') do
+                query:append(params:remove(1))
+            end
 
-        search(query, export)
+            if params:length() > 0 then
+                export = params[params:length()]:match('^--export=(.+)$') or params[params:length()]:match('^-e(.+)$')
+
+                if export ~= nil then
+                    export = export:gsub('%.csv$', '')..'.csv'
+
+                    params:remove(params:length())
+
+                    if export:match('['..('\\/:*?"<>|'):escape()..']') then
+                        export = nil
+
+                        error('The filename cannot contain any of the following characters: \\ / : * ? " < > |')
+                    end
+                end
+
+                query:append(params:concat(' '))
+            end
+
+            search(query, export)
+        end
     end
 end
 
 windower.register_event('unhandled command', function(command, ...)
     if command:lower() == 'find' then
-        local me = windower.ffxi.get_mob_by_target('me')
-        if me then
-            handle_command(':%s':format(me.name), ...)
+        local args = T{...}
+        if args[1] and args[1]:lower() == 'cards' then
+            if not args[2] then
+                log('Usage: //find cards JOB')
+                return
+            end
+            local job = args[2]:upper()
+            find_cards(job)
         else
-            handle_command(...)
+            local me = windower.ffxi.get_mob_by_target('me')
+            if me then
+                handle_command(':%s':format(me.name), ...)
+            else
+                handle_command(...)
+            end
         end
     end
 end)
 
 windower.register_event('addon command', handle_command)
+
+-- Add near the top with other global variables
+job_equipment = {
+    WAR = {
+        {{"Pumm. Mask +1", "Pummeler's Mask +1"}, 48},
+        {{"Pumm. Lorica +1", "Pummeler's Lorica +1"}, 60},
+        {{"Pumm. Mufflers +1", "Pummeler's Mufflers +1"}, 42},
+        {{"Pumm. Cuisses +1", "Pummeler's Cuisses +1"}, 54},
+        {{"Pumm. Calligae +1", "Pummeler's Calligae +1"}, 36}
+    },
+    MNK = {
+        {{"Anch. Crown +1", "Anchorite's Crown +1", "Anchor. Crown +1"}, 48},
+        {{"Anch. Cyclas +1", "Anchorite's Cyclas +1"}, 60},
+        {{"Anch. Gloves +1", "Anchorite's Gloves +1", "Anchor. Gloves +1" }, 42},
+        {{"Anch. Hose +1", "Anchorite's Hose +1"}, 54},
+        {{"Anch. Gaiters +1", "Anchorite's Gaiters +1"}, 36}
+    },    
+    WHM = {
+        {{"Theo. Cap +1", "Theophany Cap +1"}, 48},
+        {{"Theo. Bliaut +1", "Theophany Bliaut +1"}, 60},
+        {{"Theo. Mitts +1", "Theophany Mitts +1"}, 42},
+        {{"Theo. Pant. +1", "Theophany Pantaloons +1", "Th. Pant. +1"}, 54},
+        {{"Theo. Duckbills +1", "Theophany Duckbills +1"}, 36}
+    },
+    RDM = {
+        {{"Atro. Chapeau +1", "Atrophy Chapeau +1"}, 48},
+        {{"Atro. Tabard +1", "Atrophy Tabard +1"}, 60},
+        {{"Atro. Gloves +1", "Atrophy Gloves +1"}, 42},
+        {{"Atro. Tights +1", "Atrophy Tights +1"}, 54},
+        {{"Atro. Boots +1", "Atrophy Boots +1"}, 36}
+    },
+    BLM = {
+        {{"Spae. Petasos +1", "Spaekona's Petasos +1"}, 48},
+        {{"Spae. Coat +1", "Spaekona's Coat +1"}, 60},
+        {{"Spae. Gloves +1", "Spaekona's Gloves +1"}, 42},
+        {{"Spae. Tonban +1", "Spaekona's Tonban +1"}, 54},
+        {{"Spae. Sabots +1", "Spaekona's Sabots +1"}, 36}
+    },
+    THF = {
+        {{"Pill. Bonnet +1", "Pillager's Bonnet +1"}, 48},
+        {{"Pill. Vest +1", "Pillager's Vest +1"}, 60},
+        {{"Pill. Armlets +1", "Pillager's Armlets +1"}, 42},
+        {{"Pill. Culottes +1", "Pillager's Culottes +1"}, 54},
+        {{"Pill. Poulaines +1", "Pillager's Poulaines +1"}, 36}
+    },
+    PLD = {
+        {{"Rev. Coronet +1", "Reverence Coronet +1"}, 48},
+        {{"Rev. Surcoat +1", "Reverence Surcoat +1"}, 60},
+        {{"Rev. Gauntlets +1", "Reverence Gauntlets +1"}, 42},
+        {{"Rev. Breeches +1", "Reverence Breeches +1"}, 54},
+        {{"Rev. Leggings +1", "Reverence Leggings +1"}, 36}
+    },
+    DRK = {
+        {{"Igno. Burgeonet +1", "Ignominy Burgeonet +1", "Ig. Burgeonet +1"}, 48},
+        {{"Igno. Cuirass +1", "Ignominy Cuirass +1"}, 60},
+        {{"Igno. Gauntlets +1", "Ignominy Gauntlets +1",  "Ig. Gauntlets +1"}, 42},
+        {{"Igno. Flan. +1", "Ignominy Flanchard +1", "Ig. Flanchard +1"}, 54},
+        {{"Igno. Sollerets +1", "Ignominy Sollerets +1", "Ig. Sollerets +1"}, 36}
+    },
+    BST = {
+        {{"Tot. Helm +1", "Totemic Helm +1"}, 48},
+        {{"Tot. Jackcoat +1", "Totemic Jackcoat +1"}, 60},
+        {{"Tot. Gloves +1", "Totemic Gloves +1"}, 42},
+        {{"Tot. Trousers +1", "Totemic Trousers +1"}, 54},
+        {{"Tot. Gaiters +1", "Totemic Gaiters +1"}, 36}
+    },
+    BRD = {
+        {{"Brioso Roundlet +1", "Brioso Roundlet +1"}, 48},
+        {{"Brioso Just. +1", "Brioso Justaucorps +1"}, 60},
+        {{"Brioso Cuffs +1", "Brioso Cuffs +1"}, 42},
+        {{"Brioso Cann. +1", "Brioso Cannions +1"}, 54},
+        {{"Brioso Slippers +1", "Brioso Slippers +1"}, 36}
+    },
+    RNG = {
+        {{"Orion Beret +1", "Orion Beret +1"}, 48},
+        {{"Orion Jerkin +1", "Orion Jerkin +1"}, 60},
+        {{"Orion Bracers +1", "Orion Bracers +1"}, 42},
+        {{"Orion Braccae +1", "Orion Braccae +1"}, 54},
+        {{"Orion Socks +1", "Orion Socks +1"}, 36}
+    },
+    SAM = {
+        {{"Waki. Kabuto +1", "Wakido Kabuto +1"}, 48},
+        {{"Waki. Domaru +1", "Wakido Domaru +1"}, 60},
+        {{"Waki. Kote +1", "Wakido Kote +1"}, 42},
+        {{"Waki. Haidate +1", "Wakido Haidate +1"}, 54},
+        {{"Waki. Sune-Ate +1", "Wakido Sune-Ate +1", "Wakido Sune. +1" }, 36}
+    },
+    NIN = {
+        {{"Hachi. Hatsu. +1", "Hachiya Hatsuburi +1", "Hachiya Hatsu. +1"}, 48},
+        {{"Hachi. Chain. +1", "Hachiya Chainmail +1", "Hachiya Chain. +1"}, 60},
+        {{"Hachi. Tekko +1", "Hachiya Tekko +1"}, 42},
+        {{"Hachi. Hakama +1", "Hachiya Hakama +1"}, 54},
+        {{"Hachi. Kyahan +1", "Hachiya Kyahan +1"}, 36}
+    },
+    DRG = {
+        {{"Vishap Armet +1", "Vishap Armet +1"}, 48},
+        {{"Vishap Mail +1", "Vishap Mail +1"}, 60},
+        {{"Vishap F. G. +1", "Vishap Finger Gauntlets +1", "Vis. Fng. Gaunt. +1"}, 42},
+        {{"Vishap Brais +1", "Vishap Brais +1"}, 54},
+        {{"Vishap Greaves +1", "Vishap Greaves +1"}, 36}
+    },
+    SMN = {
+        {{"Con. Horn +1", "Convoker's Horn +1"}, 48},
+        {{"Con. Doublet +1", "Convoker's Doublet +1"}, 60},
+        {{"Con. Bracers +1", "Convoker's Bracers +1", "Convo. Bracers +1"}, 42},
+        {{"Con. Spats +1", "Convoker's Spats +1", "Convo. Spats +1"}, 54},
+        {{"Con. Pigaches +1", "Convoker's Pigaches +1", "Convo. Pigaches +1"}, 36}
+    },
+    BLU = {
+        {{"Assim. Keffiyeh +1", "Assimilator's Keffiyeh +1"}, 48},
+        {{"Assim. Jubbah +1", "Assimilator's Jubbah +1"}, 60},
+        {{"Assim. Bazu. +1", "Assimilator's Bazubands +1"}, 42},
+        {{"Assim. Shalwar +1", "Assimilator's Shalwar +1"}, 54},
+        {{"Assim. Charuqs +1", "Assimilator's Charuqs +1"}, 36}
+    },
+    COR = {
+        {{"Laksa. Tricorne +1", "Laksamana's Tricorne +1"}, 48},
+        {{"Laksa. Frac +1", "Laksamana's Frac +1"}, 60},
+        {{"Laksa. Gants +1", "Laksamana's Gants +1"}, 42},
+        {{"Laksa. Trews +1", "Laksamana's Trews +1"}, 54},
+        {{"Laksa. Bottes +1", "Laksamana's Bottes +1"}, 36}
+    },
+    PUP = {
+        {{"Foire Taj +1", "Foire Taj +1"}, 48},
+        {{"Foire Tobe +1", "Foire Tobe +1"}, 60},
+        {{"Foire Dastanas +1", "Foire Dastanas +1"}, 42},
+        {{"Foire Churidars +1", "Foire Churidars +1"}, 54},
+        {{"Foire Babouches +1", "Foire Babouches +1", "Foire Bab. +1"}, 36}
+    },
+    DNC = {
+        {{"Maxixi Tiara +1", "Maxixi Tiara +1"}, 48},
+        {{"Maxixi Casaque +1", "Maxixi Casaque +1"}, 60},
+        {{"Maxixi Bangles +1", "Maxixi Bangles +1"}, 42},
+        {{"Maxixi Tights +1", "Maxixi Tights +1"}, 54},
+        {{"Maxixi Toe Shoes +1", "Maxixi Toe Shoes +1"}, 36}
+    },
+    SCH = {
+        {{"Acad. Mortar. +1", "Academic's Mortarboard +1"}, 48},
+        {{"Acad. Gown +1", "Academic's Gown +1"}, 60},
+        {{"Acad. Bracers +1", "Academic's Bracers +1"}, 42},
+        {{"Acad. Pants +1", "Academic's Pants +1"}, 54},
+        {{"Acad. Loafers +1", "Academic's Loafers +1"}, 36}
+    },
+    GEO = {
+        {{"Geo. Galero +1", "Geomancy Galero +1"}, 48},
+        {{"Geo. Tunic +1", "Geomancy Tunic +1"}, 60},
+        {{"Geo. Mitaines +1", "Geomancy Mitaines +1"}, 42},
+        {{"Geo. Pants +1", "Geomancy Pants +1"}, 54},
+        {{"Geo. Sandals +1", "Geomancy Sandals +1"}, 36}
+    },
+    RUN = {
+        {{"Rune. Bandeau +1", "Runeist's Bandeau +1"}, 48},
+        {{"Rune. Coat +1", "Runeist's Coat +1"}, 60},
+        {{"Rune. Mitons +1", "Runeist's Mitons +1"}, 42},
+        {{"Rune. Trousers +1", "Runeist's Trousers +1"}, 54},
+        {{"Rune. Boots +1", "Runeist's Boots +1"}, 36}
+    }
+}
+
+-- Add this new function
+function find_cards(job)
+    if not job_equipment[job] then
+        log('No equipment data found for job: ' .. job)
+        return
+    end
+
+    -- Ensure we're logged in and storage is up to date
+    if not windower.ffxi.get_info().logged_in then
+        error('You have to be logged in to use this command.')
+        return
+    end
+
+    if not update() then
+        error('Failed to update storage information.')
+        return
+    end
+
+    local total_cards = 0
+    local card_name = 'P. ' .. job .. ' Card'
+    local player_name = windower.ffxi.get_player().name
+    local existing_cards = 0
+    
+    log('Checking ' .. job .. ' equipment...')
+    
+    for index, equip_data in ipairs(job_equipment[job]) do
+        local equip_names = equip_data[1]  -- Array of possible names
+        local cards_needed = equip_data[2]
+        local base_name = equip_names[1]:gsub(' %+1$', '')  -- Use first name as display name
+        local found_plus3 = false
+        local found_plus2 = false
+        local found_plus1 = false
+        local found_nq = false
+        
+        -- Check only current player's storage
+        local storages = global_storages[player_name]
+        if storages then
+            for storage_name, items in pairs(storages) do
+                if storage_name ~= 'gil' and storage_name ~= 'key items' then
+                    for item_id, quantity in pairs(items) do
+                        local item = res.items[tonumber(item_id)]
+                        if item and item.name then
+                            -- Check for existing cards
+                            if item.name == card_name then
+                                existing_cards = existing_cards + quantity
+                            end
+                            
+                            -- Check all possible names
+                            for _, name in ipairs(equip_names) do
+                                if name then
+                                    local nq_name = name:gsub(' %+1$', '')  -- Remove +1 to get NQ name
+                                    local plus3_name = name:gsub(' %+1$', ' +3')
+                                    local plus2_name = name:gsub(' %+1$', ' +2')
+                                    
+                                    if item.name == plus3_name then
+                                        found_plus3 = true
+                                        log(base_name:color(255) .. ': ' .. 'Already +3':color(158))
+                                        break
+                                    elseif item.name == plus2_name then
+                                        found_plus2 = true
+                                    elseif item.name == name then
+                                        found_plus1 = true
+                                    elseif item.name == nq_name then
+                                        found_nq = true
+                                    end
+                                end
+                            end
+                        end
+                        if found_plus3 then break end
+                    end
+                end
+                if found_plus3 then break end
+            end
+        end
+        
+        if not found_plus3 then
+            if found_plus2 then
+                -- Adjust card requirements based on slot for +2 gear
+                local plus2_cards
+                if index == 1 then -- Head
+                    plus2_cards = 40
+                elseif index == 2 then -- Body
+                    plus2_cards = 50
+                elseif index == 3 then -- Hands
+                    plus2_cards = 35
+                elseif index == 4 then -- Legs
+                    plus2_cards = 45
+                elseif index == 5 then -- Feet
+                    plus2_cards = 30
+                end
+                total_cards = total_cards + plus2_cards
+                log(base_name:color(255) .. ': Needs ' .. tostring(plus2_cards):color(158) .. ' cards ' .. '(currently +2)':color(158))
+            elseif found_plus1 then
+                total_cards = total_cards + cards_needed
+                log(base_name:color(255) .. ': Needs ' .. tostring(cards_needed):color(158) .. ' cards ' .. '(currently +1)':color(158))
+            elseif found_nq then
+                total_cards = total_cards + cards_needed
+                log(base_name:color(255) .. ': Needs ' .. tostring(cards_needed):color(158) .. ' cards ' .. '(currently NQ)':color(158))
+            else
+                log(base_name:color(255) .. ': ' .. 'Not found':color(158))
+            end
+        end
+    end
+    
+    -- Move card counting outside the gear check loop
+    local storages = global_storages[player_name]
+    if storages then
+        for storage_name, items in pairs(storages) do
+            if storage_name ~= 'gil' and storage_name ~= 'key items' then
+                for item_id, quantity in pairs(items) do
+                    local item = res.items[tonumber(item_id)]
+                    if item and item.name == card_name then
+                        existing_cards = existing_cards + quantity
+                    end
+                end
+            end
+        end
+    end
+    
+    if total_cards > 0 then
+        log('Total ' .. card_name .. 's needed: ' .. tostring(total_cards):color(158))
+        log('You currently have: ' .. tostring(existing_cards):color(158) .. ' cards')
+        local remaining_cards = total_cards - existing_cards
+        if remaining_cards > 0 then
+            log('Additional cards needed: ' .. tostring(remaining_cards):color(158))
+        else
+            log('You have enough cards!':color(158))
+        end
+    else
+        -- Even if no upgrades needed, still show existing cards
+        log('No upgrades needed')
+        log('You currently have: ' .. tostring(existing_cards):color(158) .. ' cards')
+    end
+end
