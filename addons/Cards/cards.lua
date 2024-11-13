@@ -10,7 +10,7 @@ notice, this list of conditions and the following disclaimer.
 * Redistributions in binary form must reproduce the above copyright
 notice, this list of conditions and the following disclaimer in the
 documentation and/or other materials provided with the distribution.
-* Neither the name of findAll nor the
+* Neither the name of Cards nor the
 names of its contributors may be used to endorse or promote products
 derived from this software without specific prior written permission.
 
@@ -168,11 +168,8 @@ first_pass             = true
 item_names             = T{}
 key_item_names         = T{}
 global_storages        = T{}
-storages_path          = windower.file_exists(windower.addon_path..'..\\findAll\\data') and 
-    windower.addon_path..'..\\findAll\\data\\' or 
-    windower.addon_path..'data\\'
+storages_path          = windower.addon_path..'data\\'
 storages_order_tokens  = L{'temporary', 'inventory', 'wardrobe', 'wardrobe 2', 'wardrobe 3', 'wardrobe 4', 'wardrobe 5', 'wardrobe 6', 'wardrobe 7', 'wardrobe 8', 'safe', 'safe 2', 'storage', 'locker', 'satchel', 'sack', 'case'}
--- This is to maintain sorting order. I don't know why this was done, but omitting this will sort the bags arbitrarily, which (I guess) was not intended
 storages_order         = S(res.bags:map(string.gsub-{' ', ''} .. string.lower .. table.get-{'english'})):sort(function(name1, name2)
     local index1 = storages_order_tokens:find(name1)
     local index2 = storages_order_tokens:find(name2)
@@ -253,7 +250,6 @@ function encase_key(key)
 end
 
 function make_table(tab,tab_offset)
-    -- Won't work for circular references or keys containing double quotes
     local offset = " ":rep(tab_offset)
     local ret = "{\n"
     for i,v in pairs(tab) do
@@ -267,18 +263,6 @@ function make_table(tab,tab_offset)
     return ret..offset..'}'
 end
 
--- Near the top with other global variables
-local normalized_path = windower.addon_path:gsub('/', '\\'):gsub('\\+', '\\')
-local parent_dir = normalized_path:gsub('Cards\\$', ''):gsub('cards\\$', '')
-local findAll_exists = windower.dir_exists(parent_dir .. 'findAll')
-local findAll_path = findAll_exists and (parent_dir .. 'findAll\\data\\') or nil
-local using_findAll = findAll_exists
-
-storages_path = using_findAll and 
-    findAll_path or 
-    windower.addon_path..'data\\'
-
--- Modify the update function
 function update()
     if not windower.ffxi.get_info().logged_in then
         error('You have to be logged in to use this addon.')
@@ -298,40 +282,23 @@ function update()
 
     global_storages[player_name] = local_storage
 
-    if using_findAll then
-        local success, err = pcall(function()
-            local file = io.open(storages_path .. player_name .. '.lua', 'w')
-            if file then
-                file:write('return '..make_table(local_storage,0)..'\n')
-                file:close()
-            else
-                error('Could not open findAll storage file for writing')
-            end
-        end)
-        
-        if not success then
-            error('Failed to write findAll storage file: ' .. err)
-            return false
+    if not windower.dir_exists(windower.addon_path..'data') then
+        windower.create_dir(windower.addon_path..'data')
+    end
+    
+    local success, err = pcall(function()
+        local file = io.open(windower.addon_path..'data\\'..player_name..'.lua', 'w')
+        if file then
+            file:write('return '..make_table(local_storage,0)..'\n')
+            file:close()
+        else
+            error('Could not open storage file for writing')
         end
-    else
-        if not windower.dir_exists(windower.addon_path..'data') then
-            windower.create_dir(windower.addon_path..'data')
-        end
-        
-        local success, err = pcall(function()
-            local file = io.open(windower.addon_path..'data\\'..player_name..'.lua', 'w')
-            if file then
-                file:write('return '..make_table(local_storage,0)..'\n')
-                file:close()
-            else
-                error('Could not open storage file for writing')
-            end
-        end)
-        
-        if not success then
-            error('Failed to write storage file: ' .. err)
-            return false
-        end
+    end)
+    
+    if not success then
+        error('Failed to write storage file: ' .. err)
+        return false
     end
 
     collectgarbage()
@@ -343,26 +310,47 @@ function update_global_storage()
     
     global_storages = T{} 
     
-    notice('Looking for storage files in: ' .. storages_path)
+    -- Include current character's storage first
+    global_storages[player_name] = get_local_storage()
+    
+    -- Then add other characters
     for _, f in pairs(windower.get_dir(storages_path)) do
         if f:sub(-4) == '.lua' and f:sub(1,-5) ~= player_name then
-            notice('Found storage file: ' .. f)
             local success, result = pcall(dofile, storages_path .. f)
             if success then
                 global_storages[f:sub(1,-5)] = result
-                notice('Successfully loaded storage for: ' .. f:sub(1,-5))
-                -- Debug the loaded storage content
-                for bag_name, items in pairs(result) do
-                    if type(items) == 'table' then
-                        notice('Loaded bag: ' .. bag_name .. ' with ' .. table.count(items) .. ' items')
-                    end
-                end
-            else
-                warning('Unable to retrieve updated item storage for %s: %s':format(f:sub(1,-5), result))
             end
         end
     end
 end
+
+windower.register_event('incoming chunk', function(id,original,modified,injected,blocked)
+    local seq = original:unpack('H',3)
+	if (next_sequence and seq == next_sequence) and zone_search then
+		update()
+        next_sequence = nil
+	end
+
+	if id == 0x00B then 
+        zone_search = false
+    elseif id == 0x00A then 
+		zone_search = false
+	elseif id == 0x01D and not zone_search then
+        zone_search = true
+		next_sequence = (seq+22)%0x10000 
+    elseif (id == 0x1E or id == 0x1F or id == 0x20) and zone_search then
+
+        next_sequence = (seq+22)%0x10000
+	end
+end)
+
+
+windower.register_event('ipc message', function(str)
+    if str == 'cards update' then
+        update()
+    end
+end)
+
 
 handle_command = function(...)
     local params = L{...}
@@ -383,12 +371,20 @@ windower.register_event('unhandled command', function(command, ...)
         end
         local job = args[1]:upper()
         find_cards(job)
+    elseif command:lower() == 'cardsall' then
+        local args = T{...}
+        if not args[1] then
+            log('Usage: //cardsall JOB')
+            return
+        end
+        local job = args[1]:upper()
+        find_cards_all(job)
     end
 end)
 
 windower.register_event('addon command', handle_command)
 
--- Add near the top with other global variables
+
 job_equipment = {
     WAR = {
         {{"Pumm. Mask +1", "Pummeler's Mask +1"}, 48},
@@ -546,7 +542,6 @@ job_equipment = {
     }
 }
 
--- Add this new function
 function find_cards(job)
     if not job_equipment[job] then
         log('No equipment data found for job: ' .. job)
@@ -567,20 +562,145 @@ function find_cards(job)
     local total_cards = 0
     local card_name = 'P. ' .. job .. ' Card'
     local player_name = windower.ffxi.get_player().name
-    local existing_cards = 0
     
     log('Checking ' .. job .. ' equipment...')
     
+    -- Get fresh storage data
+    local local_storage = get_local_storage()
+    
+    -- Count cards (simplified method)
+    local existing_cards = 0
+    for storage_name, items in pairs(local_storage) do
+        if storage_name ~= 'gil' and storage_name ~= 'key items' then
+            for item_id, quantity in pairs(items) do
+                local item = res.items[tonumber(item_id)]
+                if item and item.name == card_name then
+                    existing_cards = existing_cards + quantity
+                end
+            end
+        end
+    end
+    
+    -- Check equipment
     for index, equip_data in ipairs(job_equipment[job]) do
-        local equip_names = equip_data[1]  -- Array of possible names
+        local equip_names = equip_data[1]
         local cards_needed = equip_data[2]
-        local base_name = equip_names[1]:gsub(' %+1$', '')  -- Use first name as display name
+        local base_name = equip_names[1]:gsub(' %+1$', '')
         local found_plus3 = false
         local found_plus2 = false
         local found_plus1 = false
         local found_nq = false
         
-        -- Check only current player's storage
+        for storage_name, items in pairs(local_storage) do
+            if storage_name ~= 'gil' and storage_name ~= 'key items' then
+                for item_id, quantity in pairs(items) do
+                    local item = res.items[tonumber(item_id)]
+                    if item and item.name then
+                        for _, name in ipairs(equip_names) do
+                            if name then
+                                local nq_name = name:gsub(' %+1$', '')
+                                local plus3_name = name:gsub(' %+1$', ' +3')
+                                local plus2_name = name:gsub(' %+1$', ' +2')
+                                
+                                if item.name == plus3_name then
+                                    found_plus3 = true
+                                    log(base_name:color(255) .. ': ' .. 'Already +3':color(158))
+                                    break
+                                elseif item.name == plus2_name then
+                                    found_plus2 = true
+                                elseif item.name == name then
+                                    found_plus1 = true
+                                elseif item.name == nq_name then
+                                    found_nq = true
+                                end
+                            end
+                        end
+                    end
+                    if found_plus3 then break end
+                end
+            end
+            if found_plus3 then break end
+        end
+        
+        if not found_plus3 then
+            if found_plus2 then
+                local plus2_cards
+                if index == 1 then plus2_cards = 40
+                elseif index == 2 then plus2_cards = 50
+                elseif index == 3 then plus2_cards = 35
+                elseif index == 4 then plus2_cards = 45
+                elseif index == 5 then plus2_cards = 30 end
+                total_cards = total_cards + plus2_cards
+                log(base_name:color(255) .. ': Needs ' .. tostring(plus2_cards):color(158) .. ' cards ' .. '(currently +2)':color(158))
+            elseif found_plus1 then
+                total_cards = total_cards + cards_needed
+                log(base_name:color(255) .. ': Needs ' .. tostring(cards_needed):color(158) .. ' cards ' .. '(currently +1)':color(158))
+            elseif found_nq then
+                total_cards = total_cards + cards_needed
+                log(base_name:color(255) .. ': Needs ' .. tostring(cards_needed):color(158) .. ' cards ' .. '(currently NQ)':color(158))
+            else
+                log(base_name:color(255) .. ': ' .. 'Not found':color(158))
+            end
+        end
+    end
+    
+    if total_cards > 0 then
+        log('Total ' .. card_name .. 's needed: ' .. tostring(total_cards):color(158))
+        log('You currently have: ' .. tostring(existing_cards):color(158) .. ' cards')
+        local remaining_cards = total_cards - existing_cards
+        if remaining_cards > 0 then
+            log('Additional cards needed: ' .. tostring(remaining_cards):color(158))
+        end
+    else
+        log('No upgrades needed')
+        log('You currently have: ' .. tostring(existing_cards):color(158) .. ' cards')
+    end
+end
+
+windower.register_event('load', function()
+    if windower.ffxi.get_info().logged_in then
+        update()
+    end
+end)
+
+windower.register_event('login', function()
+    update()
+end)
+
+
+function find_cards_all(job)
+    if not job_equipment[job] then
+        log('No equipment data found for job: ' .. job)
+        return
+    end
+
+    -- First, check equipment on current character
+    if not windower.ffxi.get_info().logged_in then
+        error('You have to be logged in to use this command.')
+        return
+    end
+
+    if not update() then
+        error('Failed to update storage information.')
+        return
+    end
+
+    local total_cards = 0
+    local card_name = 'P. ' .. job .. ' Card'
+    local player_name = windower.ffxi.get_player().name
+    
+    log('Checking ' .. job .. ' equipment...')
+    
+    -- Check equipment for current character
+    for index, equip_data in ipairs(job_equipment[job]) do
+        local equip_names = equip_data[1]
+        local cards_needed = equip_data[2]
+        local base_name = equip_names[1]:gsub(' %+1$', '')
+        local found_plus3 = false
+        local found_plus2 = false
+        local found_plus1 = false
+        local found_nq = false
+        
         local storages = global_storages[player_name]
         if storages then
             for storage_name, items in pairs(storages) do
@@ -588,15 +708,9 @@ function find_cards(job)
                     for item_id, quantity in pairs(items) do
                         local item = res.items[tonumber(item_id)]
                         if item and item.name then
-                            -- Check for existing cards
-                            if item.name == card_name then
-                                existing_cards = existing_cards + quantity
-                            end
-                            
-                            -- Check all possible names
                             for _, name in ipairs(equip_names) do
                                 if name then
-                                    local nq_name = name:gsub(' %+1$', '')  -- Remove +1 to get NQ name
+                                    local nq_name = name:gsub(' %+1$', '')
                                     local plus3_name = name:gsub(' %+1$', ' +3')
                                     local plus2_name = name:gsub(' %+1$', ' +2')
                                     
@@ -623,19 +737,12 @@ function find_cards(job)
         
         if not found_plus3 then
             if found_plus2 then
-                -- Adjust card requirements based on slot for +2 gear
                 local plus2_cards
-                if index == 1 then -- Head
-                    plus2_cards = 40
-                elseif index == 2 then -- Body
-                    plus2_cards = 50
-                elseif index == 3 then -- Hands
-                    plus2_cards = 35
-                elseif index == 4 then -- Legs
-                    plus2_cards = 45
-                elseif index == 5 then -- Feet
-                    plus2_cards = 30
-                end
+                if index == 1 then plus2_cards = 40
+                elseif index == 2 then plus2_cards = 50
+                elseif index == 3 then plus2_cards = 35
+                elseif index == 4 then plus2_cards = 45
+                elseif index == 5 then plus2_cards = 30 end
                 total_cards = total_cards + plus2_cards
                 log(base_name:color(255) .. ': Needs ' .. tostring(plus2_cards):color(158) .. ' cards ' .. '(currently +2)':color(158))
             elseif found_plus1 then
@@ -649,74 +756,41 @@ function find_cards(job)
             end
         end
     end
+
+    -- Check all characters for cards
+    update_global_storage()
+    local total_available_cards = 0
+    local cards_by_char = {}
     
-    -- Move card counting outside the gear check loop
-    local storages = global_storages[player_name]
-    if storages then
-        for storage_name, items in pairs(storages) do
+    for char_name, storage in pairs(global_storages) do
+        local char_cards = 0
+        for storage_name, items in pairs(storage) do
             if storage_name ~= 'gil' and storage_name ~= 'key items' then
                 for item_id, quantity in pairs(items) do
                     local item = res.items[tonumber(item_id)]
                     if item and item.name == card_name then
-                        existing_cards = existing_cards + quantity
+                        char_cards = char_cards + quantity
                     end
                 end
             end
         end
-    end
-    
-    if total_cards > 0 then
-        log('Total ' .. card_name .. 's needed: ' .. tostring(total_cards):color(158))
-        log('You currently have: ' .. tostring(existing_cards):color(158) .. ' cards')
-        local remaining_cards = total_cards - existing_cards
-        if remaining_cards > 0 then
-            log('Additional cards needed: ' .. tostring(remaining_cards):color(158))
-        else
-            log('You have enough cards!':color(158))
-        end
-    else
-        -- Even if no upgrades needed, still show existing cards
-        log('No upgrades needed')
-        log('You currently have: ' .. tostring(existing_cards):color(158) .. ' cards')
-    end
-end
--- Add this debug logging to check_job_cards function
-function check_job_cards(job)
-    if not job_equipment[job] then
-        log('No equipment data found for job: ' .. job)
-        return
-    end
-
-    -- Ensure we're logged in
-    if not windower.ffxi.get_info().logged_in then
-        error('You have to be logged in to use this command.')
-        return
-    end
-
-    -- Debug storage info
-    notice('Current storage path: ' .. storages_path)
-    notice('Using findAll: ' .. tostring(using_findAll))
-    
-    -- Update global storage info
-    local success, err = pcall(update_global_storage)
-    if not success then
-        error('Failed to update global storage: ' .. err)
-        return
-    end
-
-    local player_name = windower.ffxi.get_player().name
-    notice('Checking storage for player: ' .. player_name)
-    
-    -- Debug global_storages content
-    for char_name, storage in pairs(global_storages) do
-        notice('Found storage for character: ' .. char_name)
-        for bag_name, items in pairs(storage) do
-            if type(items) == 'table' then
-                notice('Found bag: ' .. bag_name .. ' with ' .. table.count(items) .. ' items')
-            end
+        if char_cards > 0 then
+            cards_by_char[char_name] = char_cards
+            total_available_cards = total_available_cards + char_cards
         end
     end
 
-    -- Rest of the existing check_job_cards function...
+    -- Display results
+    log('Total ' .. card_name .. 's needed: ' .. tostring(total_cards):color(158))
+    log('Available cards by character:')
+    for char_name, count in pairs(cards_by_char) do
+        log('  ' .. char_name .. ': ' .. tostring(count):color(158))
+    end
+    log('Total available cards: ' .. tostring(total_available_cards):color(158))
+    
+    local remaining_cards = total_cards - total_available_cards
+    if remaining_cards > 0 then
+        log('Additional cards needed: ' .. tostring(remaining_cards):color(158))
+    end
 end
 
